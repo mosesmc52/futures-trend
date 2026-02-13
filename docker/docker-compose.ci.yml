@@ -3,8 +3,8 @@ version: "3.7"
 services:
   algo:
     build:
-      context: .
-    image: ghcr.io/mosesmc52/etf-trend-rp-vt:${TAG:-latest}
+      context: ..
+    image: ghcr.io/mosesmc52/futures-trend:${TAG:-latest}
     restart: unless-stopped
     dns:
       - 8.8.8.8

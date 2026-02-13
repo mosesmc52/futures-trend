@@ -62,3 +62,8 @@ class AmazonSES(object):
             },
             Source=self.from_address,
         )
+
+    def send_html_email_many(self, to_addresses, subject, content):
+        # Accepts list[str] or tuple[str,...]
+        for to in to_addresses:
+            self.send_html_email(to, subject, content)

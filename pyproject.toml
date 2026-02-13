@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "futures-trend"
+version = "0.1.0"
+description = ""
+authors = ["Moses McCall <mosesmc52@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+boto3 = "^1.42.48"
+matplotlib = "^3.10.8"
+pandas = "^3.0.0"
+python-dotenv = "^1.2.1"
+requests = "^2.32.5"
+fake-useragent = "^2.2.0"
+lxml = "^6.0.2"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

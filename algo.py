@@ -1,17 +1,21 @@
 import os
 
+from dotenv import find_dotenv, load_dotenv
 from helpers import run_daily_algo_once, send_equity_report_email
 from services.stooq import StooqDownloader
+
+load_dotenv(find_dotenv())
 
 stooq = StooqDownloader(page_delay=0.5, page_jitter=0.2)
 
 
 out = run_daily_algo_once(
     symbol="cl.f",
-    prices_csv_path="./data/CL.csv",
-    portfolio_csv_path="./data/portfolio_cl.csv",
+    prices_csv_path="data/CL.csv",
+    portfolio_csv_path="data/portfolio_cl.csv",
     lookback_days=400,
     stooq=stooq,
+    initial_portfolio_value=10_000,
     strategy_kwargs={
         "breakout_n": 55,
         "exit_n": 20,
@@ -25,16 +29,16 @@ out = run_daily_algo_once(
     },
 )
 
-
-print(out["status"], out["date"], out["action"], out["new_equity"])
+#
+# print(out["status"], out["date"], out["action"], out["new_equity"])
 
 send_equity_report_email(
-    region=os.environ["AWS_REGION"],
-    access_key=os.environ["AWS_ACCESS_KEY_ID"],
-    secret_key=os.environ["AWS_SECRET_ACCESS_KEY"],
-    from_address="reports@yourdomain.com",
-    to_addresses=["you@gmail.com"],
-    portfolio_csv_path="./data/portfolio_cl.csv",
+    region=os.environ["AWS_SES_REGION_NAME"],
+    access_key=os.environ["AWS_SES_ACCESS_KEY_ID"],
+    secret_key=os.environ["AWS_SES_SECRET_ACCESS_KEY"],
+    from_address=os.environ["FROM_ADDRESS"],
+    to_addresses=os.environ["TO_ADDRESSES"].split(","),
+    portfolio_csv_path="data/portfolio_cl.csv",
     lookback_days=60,
     plot_day_threshold=20,  # if <20 days, send metrics only
     subject_prefix="Oil Trend Paper Strategy",

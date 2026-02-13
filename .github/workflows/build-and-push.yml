@@ -24,8 +24,8 @@ jobs:
 
       - name: Build + Push (latest)
         run: |
-          TAG=${GITHUB_SHA} docker compose -f docker-compose.ci.yml build
-          TAG=${GITHUB_SHA} docker compose -f docker-compose.ci.yml push
+          TAG=${GITHUB_SHA} docker compose -f docker/docker-compose.ci.yml build
+          TAG=${GITHUB_SHA} docker compose -f docker/docker-compose.ci.yml push
 
-          TAG=latest docker compose -f docker-compose.ci.yml build
-          TAG=latest docker compose -f docker-compose.ci.yml push
+          TAG=latest docker compose -f docker/docker-compose.ci.yml build
+          TAG=latest docker compose -f docker/docker-compose.ci.yml push

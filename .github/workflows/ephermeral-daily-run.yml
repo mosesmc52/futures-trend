@@ -27,7 +27,7 @@ jobs:
 
       # The container image you want to run
       # Change this to your actual package name in GHCR
-      JOB_IMAGE: ghcr.io/mosesmc52/etf-trend-rp-vt:latest
+      JOB_IMAGE: ghcr.io/mosesmc52/futures-trend:latest
 
       # Runtime settings
       TZ: ${{ vars.TZ }}

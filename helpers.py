@@ -62,7 +62,7 @@ def donchian_channels(high, low, n):
 def run_single_iteration(
     df: pd.DataFrame,
     *,
-    prev_state: float = 0.0,  # -1,0,+1 carried from yesterday
+    prev_state: float = 0.0,  # -1,0,+1 carried from yesterday (already known at yesterday close)
     prev_exposure: float = 0.0,  # exposure carried from yesterday (pos_exec*lev_exec)
     breakout_n: int = 55,
     exit_n: int = 20,
@@ -74,26 +74,24 @@ def run_single_iteration(
     cost_bps: float = 2.0,
     slippage_bps: float = 1.0,
     periods_per_year: int = 252,
-    # Optional execution hook: you asked to "leave an empty function that buys and sells"
+    # Optional execution hook (you can ignore or pass your empty place_order wrapper)
     execute_order: Optional[Callable[[str, Dict[str, Any]], None]] = None,
 ) -> IterationResult:
     """
     Single-step version of backtest_futures_trend_long_short.
 
-    Assumptions (same as your backtest):
-      - Signals computed on the *close* of day t-1 (via shift(1) rules).
-      - Trades are executed at the *open* of day t.
-      - Strategy PnL is based on open-to-open returns.
+    Timing (matches your backtest):
+      - Signals computed using today's CLOSE compared to yesterday's channel levels (shift(1)).
+      - Trades execute NEXT OPEN.
+      - Today's PnL uses yesterday's executed position (prev_state) and yesterday's leverage estimate.
 
     Inputs:
-      df: must contain at least enough history to compute indicators and include the latest row.
-          Required columns: ["Open","High","Low","Close"].
-
-      prev_state: yesterday's "pos" state (-1,0,+1) *after* yesterday's signal processing.
-      prev_exposure: yesterday's exposure (pos_exec*lev_exec) used for turnover costs.
+      df: must contain at least 3 rows and columns: Open, High, Low, Close
+      prev_state: yesterday's state after its signal processing
+      prev_exposure: yesterday's exposure used to compute turnover costs today
 
     Returns:
-      IterationResult for the latest date in df.
+      IterationResult for the last date in df.
     """
     if df is None or len(df) < 3:
         raise ValueError("df must have at least 3 rows (need t-1 and t)")
@@ -105,7 +103,7 @@ def run_single_iteration(
 
     px = df.copy()
 
-    # --- Indicators (computed on full history up to latest row) ---
+    # --- Indicators over full history ---
     px["ATR"] = atr(px["High"], px["Low"], px["Close"], n=atr_n)
     px["ATR_PCT"] = px["ATR"] / px["Close"]
     px["EMA"] = ema(px["Close"], span=ema_span)
@@ -118,26 +116,44 @@ def run_single_iteration(
     px["EXIT_UP"] = exit_up
     px["EXIT_DN"] = exit_dn
 
-    # --- Focus on today's index (t) and yesterday (t-1) ---
+    # --- Identify t and t-1 ---
     idx = px.index
     t = idx[-1]
-    t1 = idx[-2]  # yesterday
+    t1 = idx[-2]
 
-    # Signals at close; trade next open
-    long_entry_t = bool(px.loc[t, "Close"] > px.loc[t, "DONCH_UP"].shift(1).loc[t])
-    short_entry_t = bool(px.loc[t, "Close"] < px.loc[t, "DONCH_DN"].shift(1).loc[t])
+    # --- Pre-shifted series (FIX: shift the SERIES, not a scalar) ---
+    donch_up_1 = px["DONCH_UP"].shift(1)
+    donch_dn_1 = px["DONCH_DN"].shift(1)
+    exit_up_1 = px["EXIT_UP"].shift(1)
+    exit_dn_1 = px["EXIT_DN"].shift(1)
 
-    long_exit_t = bool(px.loc[t, "Close"] < px.loc[t, "EXIT_DN"].shift(1).loc[t])
-    short_exit_t = bool(px.loc[t, "Close"] > px.loc[t, "EXIT_UP"].shift(1).loc[t])
+    # --- Helper comparisons with NaN safety ---
+    def _gt(a, b) -> bool:
+        return pd.notna(a) and pd.notna(b) and float(a) > float(b)
 
+    def _lt(a, b) -> bool:
+        return pd.notna(a) and pd.notna(b) and float(a) < float(b)
+
+    close_t = px.loc[t, "Close"]
+
+    # Breakout signals at close; trade next open
+    long_entry_t = _gt(close_t, donch_up_1.loc[t])
+    short_entry_t = _lt(close_t, donch_dn_1.loc[t])
+
+    long_exit_t = _lt(close_t, exit_dn_1.loc[t])
+    short_exit_t = _gt(close_t, exit_up_1.loc[t])
+
+    # EMA filter (evaluated on close_t)
     if use_ema_filter:
-        long_ok_t = bool(px.loc[t, "Close"] > px.loc[t, "EMA"])
-        short_ok_t = bool(px.loc[t, "Close"] < px.loc[t, "EMA"])
+        ema_t = px.loc[t, "EMA"]
+        long_ok_t = pd.notna(ema_t) and float(close_t) > float(ema_t)
+        short_ok_t = pd.notna(ema_t) and float(close_t) < float(ema_t)
     else:
+        ema_t = px.loc[t, "EMA"]
         long_ok_t = True
         short_ok_t = True
 
-    # --- Position state machine (single update for day t) ---
+    # --- State machine update (produces NEW state to carry forward) ---
     state = float(prev_state)
     action = "HOLD"
 
@@ -154,70 +170,67 @@ def run_single_iteration(
             action = "NOOP"
 
     elif state == 1.0:
-        # exit or filter fail
-        if long_exit_t or (use_ema_filter and not long_ok_t):
+        # Long exits; optional reversal
+        if bool(long_exit_t) or (use_ema_filter and not bool(long_ok_t)):
             state = 0.0
             action = "SELL"
         else:
-            # allow reversal
-            if short_entry_t and short_ok_t:
+            if bool(short_entry_t and short_ok_t):
                 state = -1.0
                 action = "SELL/SHORT"
 
     elif state == -1.0:
-        if short_exit_t or (use_ema_filter and not short_ok_t):
+        # Short exits; optional reversal
+        if bool(short_exit_t) or (use_ema_filter and not bool(short_ok_t)):
             state = 0.0
             action = "COVER"
         else:
-            if long_entry_t and long_ok_t:
+            if bool(long_entry_t and long_ok_t):
                 state = 1.0
                 action = "COVER/BUY"
 
-    # --- Vol targeting (leverage for day t, but EXEC at next open => use t-1 for execution today) ---
+    # --- Vol targeting (daily) ---
     target_daily_vol = float(target_annual_vol) / float(np.sqrt(periods_per_year))
-
-    # Daily vol estimate series
     est_daily_vol = px["ATR_PCT"].replace(0, np.nan)
 
     lev_series = (target_daily_vol / est_daily_vol).clip(upper=max_leverage).fillna(0.0)
 
-    # Execute at today's open: use yesterday's (t-1) state and leverage
-    pos_exec = float(prev_state)  # yesterday's final state -> today's position
-    lev_exec = float(lev_series.loc[t1])  # yesterday's vol estimate -> today's sizing
-    exposure = pos_exec * lev_exec  # signed exposure used for today's PnL
+    # Execute at today's open => use yesterday's state and yesterday's leverage
+    pos_exec = float(prev_state)
+    lev_exec = float(lev_series.loc[t1]) if pd.notna(lev_series.loc[t1]) else 0.0
+    exposure = pos_exec * lev_exec
 
     # Open-to-open return for today
     r_oo = float(px["Open"].pct_change().loc[t])
     if np.isnan(r_oo):
         r_oo = 0.0
 
-    # Costs on exposure change (turnover)
+    # Turnover + costs on exposure changes
     turnover = float(abs(exposure - float(prev_exposure)))
     total_bps = float(cost_bps + slippage_bps)
     costs = turnover * (total_bps / 1e4)
 
     ret = exposure * r_oo - costs
 
-    # Optional execution hook (EMPTY by default)
+    # Optional execution hook
     if execute_order is not None:
-        # You can implement broker/paper order logic outside and pass it in.
-        # We'll call it with action + a payload snapshot.
         payload = {
-            "date": t,
+            "date": pd.Timestamp(t),
             "action": action,
-            "target_state": state,
+            "new_state": state,
+            "prev_state": float(prev_state),
             "pos_exec": pos_exec,
             "lev_exec": lev_exec,
             "exposure": exposure,
             "open": float(px.loc[t, "Open"]),
-            "close": float(px.loc[t, "Close"]),
+            "close": float(close_t),
         }
         execute_order(action, payload)
 
     debug = {
-        "Close": float(px.loc[t, "Close"]),
+        "Close": float(close_t),
         "Open": float(px.loc[t, "Open"]),
-        "EMA": float(px.loc[t, "EMA"]) if pd.notna(px.loc[t, "EMA"]) else np.nan,
+        "EMA": float(ema_t) if pd.notna(ema_t) else np.nan,
         "DONCH_UP": (
             float(px.loc[t, "DONCH_UP"]) if pd.notna(px.loc[t, "DONCH_UP"]) else np.nan
         ),
@@ -230,6 +243,18 @@ def run_single_iteration(
         "EXIT_DN": (
             float(px.loc[t, "EXIT_DN"]) if pd.notna(px.loc[t, "EXIT_DN"]) else np.nan
         ),
+        "DONCH_UP_shift1": (
+            float(donch_up_1.loc[t]) if pd.notna(donch_up_1.loc[t]) else np.nan
+        ),
+        "DONCH_DN_shift1": (
+            float(donch_dn_1.loc[t]) if pd.notna(donch_dn_1.loc[t]) else np.nan
+        ),
+        "EXIT_UP_shift1": (
+            float(exit_up_1.loc[t]) if pd.notna(exit_up_1.loc[t]) else np.nan
+        ),
+        "EXIT_DN_shift1": (
+            float(exit_dn_1.loc[t]) if pd.notna(exit_dn_1.loc[t]) else np.nan
+        ),
         "ATR_PCT_t1": (
             float(px.loc[t1, "ATR_PCT"]) if pd.notna(px.loc[t1, "ATR_PCT"]) else np.nan
         ),
@@ -239,22 +264,22 @@ def run_single_iteration(
             "short_entry": short_entry_t,
             "long_exit": long_exit_t,
             "short_exit": short_exit_t,
-            "long_ok": long_ok_t,
-            "short_ok": short_ok_t,
+            "long_ok": bool(long_ok_t),
+            "short_ok": bool(short_ok_t),
         },
     }
 
     return IterationResult(
         date=pd.Timestamp(t),
         action=action,
-        state=state,  # this is your *new* state to carry forward
+        state=float(state),
         pos_exec=pos_exec,
         lev_exec=lev_exec,
-        exposure=exposure,
-        r_oo=r_oo,
-        turnover=turnover,
-        costs=costs,
-        ret=ret,
+        exposure=float(exposure),
+        r_oo=float(r_oo),
+        turnover=float(turnover),
+        costs=float(costs),
+        ret=float(ret),
         debug=debug,
     )
 
@@ -359,21 +384,6 @@ def portfolio_state_from_last_row(last: Dict[str, str]) -> "PortfolioState":
     )
 
 
-def initial_portfolio_state(initial_equity: float) -> "PortfolioState":
-    """
-    Default initial PortfolioState when no CSV exists.
-    """
-    init_equity = float(initial_equity)
-    return PortfolioState(
-        cash=init_equity,
-        qty=0,
-        equity=init_equity,
-        pos_state=0.0,
-        exposure=0.0,
-        last_date=None,
-    )
-
-
 def append_portfolio_row(path: str, row: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     exists = os.path.exists(path)
@@ -384,26 +394,6 @@ def append_portfolio_row(path: str, row: Dict[str, Any]) -> None:
             w.writeheader()
         out = {k: row.get(k, "") for k in PORTFOLIO_COLUMNS}
         w.writerow(out)
-
-
-def load_portfolio_state(
-    portfolio_csv_path: str,
-    *,
-    initial_equity_env: str = "INITIAL_PORTFOLIO_VALUE",
-) -> "PortfolioState":
-    """
-    Load portfolio state from CSV if present; otherwise initialize from env var.
-
-    Depends on:
-      - _read_last_portfolio_row(path) -> Optional[Dict[str,str]]
-      - PortfolioState dataclass
-    """
-    last = _read_last_portfolio_row(portfolio_csv_path)
-    if last is None:
-        initial_equity = float(os.environ.get(initial_equity_env, "100000"))
-        return initial_portfolio_state(initial_equity)
-
-    return portfolio_state_from_last_row(last)
 
 
 # ============================================================
@@ -494,36 +484,42 @@ def run_daily_algo_once(
     symbol: str,
     prices_csv_path: str,
     portfolio_csv_path: str,
+    initial_portfolio_value: float,  # <-- NEW: explicit initial capital
     lookback_days: int = 400,
     interval: str = "d",
-    initial_equity_env: str = "INITIAL_PORTFOLIO_VALUE",
     max_gross_leverage: float = 1.0,
     strategy_kwargs: Optional[Dict[str, Any]] = None,
     stooq: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
-    1) Update price history (StooqDownloader.update_prices)
-    2) Load last X days into df
-    3) Load portfolio state from CSV (or env initial)
-    4) Run run_single_iteration(df, prev_state, prev_exposure) -> tells us NEW state for tomorrow
-    5) Convert NEW state to target_qty and execute via place_order() at today's OPEN
-    6) Append portfolio row (includes trade + portfolio state)
+    One daily iteration:
+      1) Update price history via StooqDownloader
+      2) Load last N days into DataFrame
+      3) Load portfolio state from CSV (or initialize with initial_portfolio_value)
+      4) Run run_single_iteration
+      5) Rebalance via place_order
+      6) Append new row to portfolio CSV
     """
+
     if strategy_kwargs is None:
         strategy_kwargs = {}
     if stooq is None:
         raise ValueError("Pass stooq=StooqDownloader() instance")
 
-    # (1) Update prices CSV to latest
+    # --------------------------------------------------
+    # 1) Update price history
+    # --------------------------------------------------
     stooq.update_prices(symbol, prices_csv_path, interval=interval)
 
-    # (2) Load last X days to df
+    # --------------------------------------------------
+    # 2) Load last N days into DataFrame
+    # --------------------------------------------------
     raw = pd.read_csv(prices_csv_path)
 
     if "Date" not in raw.columns:
         raise ValueError(f"{prices_csv_path} missing 'Date' column")
 
-    # Parse both "23 Apr 1993" and ISO; do two-pass parse
+    # Parse flexible date formats
     dt1 = pd.to_datetime(raw["Date"], errors="coerce", format="%d %b %Y")
     dt2 = pd.to_datetime(raw["Date"], errors="coerce")
     raw["Date"] = dt1.fillna(dt2)
@@ -535,17 +531,32 @@ def run_daily_algo_once(
             raise ValueError(f"Price CSV missing required column '{col}'")
 
     df = raw[["Open", "High", "Low", "Close"]].tail(int(lookback_days)).copy()
-    if len(df) < 3:
-        raise ValueError(
-            "Not enough history to run a single iteration (need >= 3 rows)"
-        )
 
-    # (3) Load portfolio state
-    p = load_portfolio_state(portfolio_csv_path, initial_equity_env=initial_equity_env)
+    if len(df) < 3:
+        raise ValueError("Not enough history to run a single iteration")
 
     today = df.index[-1]
     today_str = today.strftime("%Y-%m-%d")
 
+    # --------------------------------------------------
+    # 3) Load portfolio state
+    # --------------------------------------------------
+    last_row = _read_last_portfolio_row(portfolio_csv_path)
+
+    if last_row is None:
+        # Explicit initialization
+        p = PortfolioState(
+            cash=float(initial_portfolio_value),
+            qty=0,
+            equity=float(initial_portfolio_value),
+            pos_state=0.0,
+            exposure=0.0,
+            last_date=None,
+        )
+    else:
+        p = portfolio_state_from_last_row(last_row)
+
+    # Avoid double-processing same day
     if p.last_date == today_str:
         return {
             "status": "skipped",
@@ -557,7 +568,9 @@ def run_daily_algo_once(
     open_px = float(df["Open"].iloc[-1])
     close_px = float(df["Close"].iloc[-1])
 
-    # (4) Run strategy iteration (determines NEW state)
+    # --------------------------------------------------
+    # 4) Run strategy iteration
+    # --------------------------------------------------
     res = run_single_iteration(
         df,
         prev_state=p.pos_state,
@@ -565,7 +578,9 @@ def run_daily_algo_once(
         **strategy_kwargs,
     )
 
-    # (5) Decide target qty from NEW state; execute at OPEN via place_order()
+    # --------------------------------------------------
+    # 5) Position sizing + paper execution
+    # --------------------------------------------------
     target_qty = target_qty_from_state(
         state=res.state,
         equity=p.equity,
@@ -583,9 +598,6 @@ def run_daily_algo_once(
 
     new_equity = mark_to_market_equity(new_cash, new_qty, close_px)
 
-    # Carry forward:
-    # - pos_state becomes NEW state from run_single_iteration
-    # - exposure becomes TODAY's exposure used for today PnL/costs (res.exposure)
     p_next = PortfolioState(
         cash=new_cash,
         qty=new_qty,
@@ -595,7 +607,9 @@ def run_daily_algo_once(
         last_date=today_str,
     )
 
-    # (6) Append portfolio row including trade + state
+    # --------------------------------------------------
+    # 6) Append portfolio row
+    # --------------------------------------------------
     append_portfolio_row(
         portfolio_csv_path,
         {
@@ -626,7 +640,6 @@ def run_daily_algo_once(
         "prev_qty": p.qty,
         "new_qty": p_next.qty,
         "trade": trade_rec,
-        "debug": res.debug,
     }
 
 
@@ -777,7 +790,7 @@ def send_equity_report_email(
     to_addresses: Sequence[str],
     portfolio_csv_path: str,
     lookback_days: int = 60,
-    plot_day_threshold: int = 20,  # <-- NEW: only include chart if >= this many days
+    plot_day_threshold: int = 20,
     equity_col: str = "equity",
     date_col: str = "date",
     symbol_col: Optional[str] = "symbol",
@@ -786,23 +799,58 @@ def send_equity_report_email(
     subject_prefix: str = "Strategy Report",
 ) -> None:
     """
-    If number of rows in the last `lookback_days` is:
-      - >= plot_day_threshold: send chart + metrics
-      - <  plot_day_threshold: send only portfolio value + metrics (no chart)
-
-    Metrics included always: CAGR, Sharpe, MaxDD, Sortino, end equity.
+    Updated behavior:
+      - If portfolio CSV has <2 usable rows, DO NOT raise.
+      - Instead email a short message explaining the issue.
+      - Otherwise behave as before (metrics only if <threshold, chart+metrics if enough days).
     """
     if not to_addresses:
         raise ValueError("to_addresses must be non-empty")
 
-    df = pd.read_csv(portfolio_csv_path)
+    ses = AmazonSES(
+        region=region,
+        access_key=access_key,
+        secret_key=secret_key,
+        from_address=from_address,
+    )
 
+    # --- Try read CSV ---
+    try:
+        df = pd.read_csv(portfolio_csv_path)
+    except Exception as e:
+        subject = f"{subject_prefix} — Unable to read portfolio CSV"
+        html = f"""
+        <html><body style="font-family: Arial, sans-serif;">
+          <h3>{subject_prefix}</h3>
+          <p>Could not read portfolio CSV at: <code>{portfolio_csv_path}</code></p>
+          <p>Error: <code>{type(e).__name__}: {str(e)}</code></p>
+        </body></html>
+        """
+        ses.send_html_email_many(to_addresses, subject, html)
+        return
+
+    # Optional symbol filter
     if symbol_filter and symbol_col and symbol_col in df.columns:
         df = df[df[symbol_col].astype(str).str.lower() == str(symbol_filter).lower()]
 
+    # Not enough rows => EMAIL MESSAGE ONLY (no raise)
     if len(df) < 2:
-        raise ValueError("Portfolio CSV does not have enough rows to report")
+        subject = f"{subject_prefix} — Not enough data yet"
+        msg = (
+            "Portfolio CSV does not have enough rows to report.\n"
+            f"Need at least 2 rows (days) but found {len(df)}.\n"
+            f"Path: {portfolio_csv_path}\n"
+        )
+        html = f"""
+        <html><body style="font-family: Arial, sans-serif; line-height:1.35;">
+          <h3>{subject_prefix}</h3>
+          <pre style="background:#f6f6f6; padding:12px; border:1px solid #ddd;">{msg}</pre>
+        </body></html>
+        """
+        ses.send_html_email_many(to_addresses, subject, html)
+        return
 
+    # ---- Continue normal behavior (existing logic) ----
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
     df = (
         df.dropna(subset=[date_col, equity_col])
@@ -810,9 +858,25 @@ def send_equity_report_email(
         .tail(int(lookback_days))
     )
 
+    # If still not enough after cleaning => EMAIL MESSAGE ONLY
     if len(df) < 2:
-        raise ValueError("Not enough rows after lookback_days for reporting")
+        subject = f"{subject_prefix} — Not enough usable rows"
+        msg = (
+            "Portfolio CSV does not have enough usable rows to report after parsing dates/equity.\n"
+            f"Need at least 2 usable rows but found {len(df)}.\n"
+            f"Path: {portfolio_csv_path}\n"
+            f"Required columns: {date_col!r}, {equity_col!r}\n"
+        )
+        html = f"""
+        <html><body style="font-family: Arial, sans-serif; line-height:1.35;">
+          <h3>{subject_prefix}</h3>
+          <pre style="background:#f6f6f6; padding:12px; border:1px solid #ddd;">{msg}</pre>
+        </body></html>
+        """
+        ses.send_html_email_many(to_addresses, subject, html)
+        return
 
+    # --- metrics ---
     metrics = compute_metrics_from_equity(
         df, equity_col=equity_col, date_col=date_col, periods_per_year=periods_per_year
     )
@@ -820,23 +884,16 @@ def send_equity_report_email(
     def fmt_pct(x: float) -> str:
         return f"{x*100:,.2f}%"
 
-    # Subject
     subject = f"{subject_prefix} — {metrics.end_date} (last {metrics.n_days} days)"
 
-    # Body (chart only if enough days)
     if metrics.n_days < int(plot_day_threshold):
         html_content = f"""
         <html>
           <body style="font-family: Arial, sans-serif; line-height: 1.35;">
             <h2>{subject_prefix}: Snapshot</h2>
-
             <p><b>Date range:</b> {metrics.start_date} → {metrics.end_date} &nbsp; | &nbsp;
                <b>Days:</b> {metrics.n_days}</p>
-
-            <p>
-              <b>Current equity:</b> {metrics.end_equity:,.2f}
-            </p>
-
+            <p><b>Current equity:</b> {metrics.end_equity:,.2f}</p>
             <h3>Performance</h3>
             <ul>
               <li><b>CAGR:</b> {fmt_pct(metrics.cagr)}</li>
@@ -844,7 +901,6 @@ def send_equity_report_email(
               <li><b>Sharpe:</b> {metrics.sharpe:,.2f}</li>
               <li><b>Sortino:</b> {metrics.sortino:,.2f}</li>
             </ul>
-
             <p style="color:#666; font-size: 12px;">
               Chart omitted because history &lt; {plot_day_threshold} days.
             </p>
@@ -856,20 +912,16 @@ def send_equity_report_email(
         png_b64 = equity_curve_png_base64(
             df, equity_col=equity_col, date_col=date_col, title=title
         )
-
         html_content = f"""
         <html>
           <body style="font-family: Arial, sans-serif; line-height: 1.35;">
             <h2>{subject_prefix}: Last {metrics.n_days} Trading Days</h2>
-
             <p><b>Date range:</b> {metrics.start_date} → {metrics.end_date} &nbsp; | &nbsp;
                <b>Days:</b> {metrics.n_days}</p>
-
             <p>
               <b>Start equity:</b> {metrics.start_equity:,.2f}<br/>
               <b>Current equity:</b> {metrics.end_equity:,.2f}
             </p>
-
             <h3>Performance</h3>
             <ul>
               <li><b>CAGR:</b> {fmt_pct(metrics.cagr)}</li>
@@ -877,22 +929,11 @@ def send_equity_report_email(
               <li><b>Sharpe:</b> {metrics.sharpe:,.2f}</li>
               <li><b>Sortino:</b> {metrics.sortino:,.2f}</li>
             </ul>
-
             <h3>Equity Curve</h3>
             <img alt="equity_curve" style="max-width: 100%; border: 1px solid #ddd;"
                  src="data:image/png;base64,{png_b64}" />
-
-            <p style="color:#666; font-size: 12px;">
-              Notes: Metrics computed from daily equity pct-change. MaxDD is the minimum drawdown (negative %).
-            </p>
           </body>
         </html>
         """
 
-    ses = AmazonSES(
-        region=region,
-        access_key=access_key,
-        secret_key=secret_key,
-        from_address=from_address,
-    )
     ses.send_html_email_many(to_addresses, subject, html_content)
