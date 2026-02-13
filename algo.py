@@ -1,7 +1,7 @@
 import os
 
 from dotenv import find_dotenv, load_dotenv
-from helpers import run_daily_algo_once, send_equity_report_email
+from helpers import run_daily_algo_once, send_equity_report_email, str2bool
 from services.stooq import StooqDownloader
 
 load_dotenv(find_dotenv())
@@ -31,15 +31,15 @@ out = run_daily_algo_once(
 
 #
 # print(out["status"], out["date"], out["action"], out["new_equity"])
-
-send_equity_report_email(
-    region=os.environ["AWS_SES_REGION_NAME"],
-    access_key=os.environ["AWS_SES_ACCESS_KEY_ID"],
-    secret_key=os.environ["AWS_SES_SECRET_ACCESS_KEY"],
-    from_address=os.environ["FROM_ADDRESS"],
-    to_addresses=os.environ["TO_ADDRESSES"].split(","),
-    portfolio_csv_path="data/portfolio_cl.csv",
-    lookback_days=60,
-    plot_day_threshold=20,  # if <20 days, send metrics only
-    subject_prefix="Oil Trend Paper Strategy",
-)
+if str2bool(os.getenv("EMAIL_POSITIONS", False)):
+    send_equity_report_email(
+        region=os.environ["AWS_SES_REGION_NAME"],
+        access_key=os.environ["AWS_SES_ACCESS_KEY_ID"],
+        secret_key=os.environ["AWS_SES_SECRET_ACCESS_KEY"],
+        from_address=os.environ["FROM_ADDRESS"],
+        to_addresses=os.environ["TO_ADDRESSES"].split(","),
+        portfolio_csv_path="data/portfolio_cl.csv",
+        lookback_days=60,
+        plot_day_threshold=20,  # if <20 days, send metrics only
+        subject_prefix="Oil Trend Paper Strategy",
+    )
