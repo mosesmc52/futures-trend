@@ -4,6 +4,7 @@ services:
   algo:
     build:
       context: ..
+      dockerfile: docker/Dockerfile.worker
     image: ghcr.io/mosesmc52/futures-trend:${TAG:-latest}
     restart: unless-stopped
     dns:
