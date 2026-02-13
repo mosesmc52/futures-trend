@@ -1,0 +1,11 @@
+version: "3.7"
+
+services:
+  algo:
+    build:
+      context: .
+    image: ghcr.io/mosesmc52/etf-trend-rp-vt:${TAG:-latest}
+    restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
