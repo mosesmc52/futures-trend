@@ -50,23 +50,21 @@ jobs:
           DO_SSH_KEY_FINGERPRINT: ${{ secrets.DO_SSH_KEY_FINGERPRINT }}
 
           # Only required if your GHCR image is private
-          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
 
           # Your job secrets/vars (example set; adjust to your app)
-          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
-          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
-          TO_ADDRESSES: ${{ secrets.TO_ADDRESSES }}
-          FROM_ADDRESS: ${{ secrets.FROM_ADDRESS }}
           AWS_SES_ACCESS_KEY_ID: ${{ secrets.AWS_SES_ACCESS_KEY_ID }}
           AWS_SES_SECRET_ACCESS_KEY: ${{ secrets.AWS_SES_SECRET_ACCESS_KEY }}
-
-          ALPACA_BASE_URL: ${{ vars.ALPACA_BASE_URL }}
-          LIVE_TRADE: ${{ vars.LIVE_TRADE }}
+          SPACES_KEY: ${{ secrets.SPACES_KEY }}
+          SPACES_SECRET: ${{ secrets.SPACES_SECRET }}
+          TO_ADDRESSES: ${{ vars.TO_ADDRESSES }}
+          FROM_ADDRESS: ${{ vars.FROM_ADDRESS }}
+          GHCR_USERNAME: ${{ vars.GHCR_USERNAME }}
           EMAIL_POSITIONS: ${{ vars.EMAIL_POSITIONS }}
           AWS_SES_REGION_NAME: ${{ vars.AWS_SES_REGION_NAME }}
-          ALPACA_PAPER: ${{ vars.ALPACA_PAPER }}
-          USE_DYNAMIC_VT: ${{ vars.USE_DYNAMIC_VT }}
+          SPACES_BUCKET: ${{ vars.SPACES_BUCKET }}
+          SPACES_ENDPOINT: ${{ vars.SPACES_ENDPOINT }}
+          SPACES_REGION: ${{ vars.SPACES_REGION }}
 
         run: |
           set -euo pipefail
@@ -97,18 +95,17 @@ jobs:
               permissions: "0600"
               content: |
                 TZ=${TZ}
-                ALPACA_BASE_URL=${ALPACA_BASE_URL}
-                ALPACA_KEY_ID=${ALPACA_KEY_ID}
-                ALPACA_SECRET_KEY=${ALPACA_SECRET_KEY}
-                LIVE_TRADE=${LIVE_TRADE}
                 EMAIL_POSITIONS=${EMAIL_POSITIONS}
                 TO_ADDRESSES=${TO_ADDRESSES}
                 FROM_ADDRESS=${FROM_ADDRESS}
                 AWS_SES_REGION_NAME=${AWS_SES_REGION_NAME}
                 AWS_SES_ACCESS_KEY_ID=${AWS_SES_ACCESS_KEY_ID}
                 AWS_SES_SECRET_ACCESS_KEY=${AWS_SES_SECRET_ACCESS_KEY}
-                USE_DYNAMIC_VT=${USE_DYNAMIC_VT}
-                ALPACA_PAPER=${ALPACA_PAPER}
+                SPACES_KEY=${SPACES_KEY}
+                SPACES_SECRET=${SPACES_SECRET}
+                SPACES_BUCKET=${SPACES_BUCKET}
+                SPACES_REGION=${SPACES_REGION}
+                SPACES_ENDPOINT=${SPACES_ENDPOINT}
 
             - path: /opt/job/run.sh
               permissions: "0700"
