@@ -17,14 +17,14 @@ out = run_daily_algo_once(
     stooq=stooq,
     initial_portfolio_value=10_000,
     strategy_kwargs={
-        "breakout_n": 55,
-        "exit_n": 20,
+        "breakout_n": 20,
+        "exit_n": 10,
         "atr_n": 20,
-        "ema_span": 200,
+        "ema_span": 100,
         "use_ema_filter": True,
         "target_annual_vol": 0.20,
         "max_leverage": 2.0,
-        "cost_bps": 2.0,
+        "cost_bps": 0.0,
         "slippage_bps": 1.0,
     },
 )
