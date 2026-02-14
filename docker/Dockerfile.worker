@@ -23,6 +23,9 @@ RUN poetry install --no-interaction --no-root
 COPY algo.py .
 COPY helpers.py .
 COPY SES.py .
+COPY services/stooq.py /app/services/stooq.py
+COPY services/spaces.py /app/services/spaces.py
+COPY services/spaces_file_sync.py /app/services/spaces_file_sync.py
 COPY scheduler/run.sh /app/run.sh
 COPY scheduler/crontab /etc/cron.d/weekly-job
 COPY supervisor/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
