@@ -64,7 +64,6 @@ class SyncConfig:
     acl: str = "private"  # "private" or "public-read"
     backup_prefix: Optional[str] = None  # e.g. "backups"
     overwrite_local: bool = True
-    make_dirs: bool = True
     refuse_empty_upload: bool = True
 
 
@@ -143,8 +142,12 @@ def download_file(spaces: SpacesClient, cfg: SyncConfig) -> Optional[Path]:
         print("ERROR: download requires --key")
         return None
 
-    if cfg.make_dirs:
-        ensure_parent_dir(cfg.path)
+    try:
+        cfg.path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        print(f"ERROR: Failed to create directory for {cfg.path}")
+        print(str(e))
+        return None
 
     if cfg.path.exists() and not cfg.overwrite_local:
         print(f"ERROR: Local file exists and overwrite disabled: {cfg.path}")
@@ -153,6 +156,10 @@ def download_file(spaces: SpacesClient, cfg: SyncConfig) -> Optional[Path]:
     try:
         resp = spaces.client.get_object(Bucket=spaces.bucket, Key=cfg.key)
     except ClientError as e:
+        code = getattr(e, "response", {}).get("Error", {}).get("Code")
+        if code in ("NoSuchKey", "404"):
+            print(f"Remote file not found: s3://{spaces.bucket}/{cfg.key}")
+            return None
         raise RuntimeError(
             f"Failed to download s3://{spaces.bucket}/{cfg.key}: {e}"
         ) from e
@@ -234,11 +241,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
             default=None,
             help="If set, backups existing remote object before replace.",
         )
-        sp.add_argument(
-            "--make-dirs",
-            action="store_true",
-            help="Create parent dirs for local path.",
-        )
+
         sp.add_argument(
             "--no-refuse-empty-upload",
             action="store_true",
@@ -298,7 +301,6 @@ def main(argv: Sequence[str]) -> int:
         acl=args.acl,
         backup_prefix=args.backup_prefix,
         overwrite_local=not getattr(args, "no_overwrite_local", False),
-        make_dirs=bool(getattr(args, "make_dirs", False)),
         refuse_empty_upload=not getattr(args, "no_refuse_empty_upload", False),
     )
 
@@ -306,6 +308,8 @@ def main(argv: Sequence[str]) -> int:
 
     if args.cmd == "download":
         out = download_file(spaces, cfg)
+        if out is None:
+            return 1
         print(f"Downloaded to: {out}")
         return 0
 
@@ -318,6 +322,8 @@ def main(argv: Sequence[str]) -> int:
 
     if args.cmd == "sync":
         out = download_file(spaces, cfg)
+        if out is None:
+            return 1
         print(f"Downloaded to: {out}")
         url = upload_file_replace(spaces, cfg)
         print(f"Uploaded (replaced): s3://{spaces.bucket}/{cfg.key}")

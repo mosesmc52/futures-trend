@@ -105,13 +105,13 @@ trap on_exit EXIT INT TERM
 # ----------------------------
 cd /app
 
-poetry run python services/spaces_file_sync.py download --key CL.csv --path /data/CL.csv
-poetry run python services/spaces_file_sync.py download --key portfolio_cl.csv --path /data/portfolio_cl.csv
+poetry run python services/spaces_file_sync.py download --key CL.csv --path data/CL.csv
+poetry run python services/spaces_file_sync.py download --key portfolio_cl.csv --path data/portfolio_cl.csv
 
 poetry run python algo.py
 
-poetry run python services/spaces_file_sync.py upload --key CL.csv --path /data/CL.csv
-poetry run python services/spaces_file_sync.py upload --key portfolio_cl.csv --path /data/portfolio_cl.csv
+poetry run python services/spaces_file_sync.py upload --key CL.csv --path data/CL.csv
+poetry run python services/spaces_file_sync.py upload --key portfolio_cl.csv --path data/portfolio_cl.csv
 
 # Success heartbeat
 kuma_send "up" "${KUMA_MSG_OK:-ok}" "$(to_ms)" "0"

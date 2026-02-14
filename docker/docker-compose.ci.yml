@@ -6,7 +6,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.worker
     volumes:
-      - ./data:/app/data
+      - ../data:/app/data
     image: ghcr.io/mosesmc52/futures-trend:${TAG:-latest}
     restart: unless-stopped
     dns:
