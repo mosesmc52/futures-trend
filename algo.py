@@ -15,7 +15,7 @@ out = run_daily_algo_once(
     portfolio_csv_path="data/portfolio_cl.csv",
     lookback_days=400,
     stooq=stooq,
-    initial_portfolio_value=10_000,
+    initial_portfolio_value=40_000,
     strategy_kwargs={
         "breakout_n": 20,
         "exit_n": 10,
