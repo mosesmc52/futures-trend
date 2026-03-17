@@ -933,6 +933,7 @@ def send_equity_report_email(
         png_b64 = equity_curve_png_base64(
             df, equity_col=equity_col, date_col=date_col, title=title
         )
+        image_cid = "equity_curve_png"
         html_content = f"""
         <html>
           <body style="font-family: Arial, sans-serif; line-height: 1.35;">
@@ -952,9 +953,21 @@ def send_equity_report_email(
             </ul>
             <h3>Equity Curve</h3>
             <img alt="equity_curve" style="max-width: 100%; border: 1px solid #ddd;"
-                 src="data:image/png;base64,{png_b64}" />
+                 src="cid:{image_cid}" />
           </body>
         </html>
         """
+        inline_images = [
+            {
+                "content_id": image_cid,
+                "filename": "equity_curve.png",
+                "data": base64.b64decode(png_b64),
+                "subtype": "png",
+            }
+        ]
+        ses.send_html_email_many_with_inline_images(
+            to_addresses, subject, html_content, inline_images
+        )
+        return
 
     ses.send_html_email_many(to_addresses, subject, html_content)
