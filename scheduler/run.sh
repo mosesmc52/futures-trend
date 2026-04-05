@@ -24,12 +24,6 @@ set -a
 [ -f /app/.env ] && . /app/.env
 set +a
 
-# ----------------------------
-# Sanity checks (don’t print secrets)
-# ----------------------------
-: "${ALPACA_KEY_ID:?ALPACA_KEY_ID not set}"
-: "${ALPACA_SECRET_KEY:?ALPACA_SECRET_KEY not set}"
-
 # Kuma config (same as yours)
 # --- Kuma config / URL building ---
 KUMA_URL="${KUMA_PUSH_URL:-}"
@@ -108,6 +102,7 @@ on_exit() {
 }
 trap on_exit EXIT INT TERM
 
+# ----------------------------
 # Run your job
 # ----------------------------
 cd /app
