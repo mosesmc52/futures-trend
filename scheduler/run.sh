@@ -3,11 +3,19 @@
 # - Success: sends status=up with run duration
 # - Failure: sends status=down with exit code
 
-echo "[$(date)] Running Futures Trend Paper Trade Algo..."
-
 set -euo pipefail
 set -x
 export PYTHONUNBUFFERED=1
+
+RUN_LOG_FILE="${RUN_LOG_FILE:-/tmp/etf-volatility-harvest.log}"
+mkdir -p "$(dirname "$RUN_LOG_FILE")"
+touch "$RUN_LOG_FILE"
+
+# Mirror all script output to stdout so `docker run` emits it to the droplet log,
+# while also keeping an in-container copy for direct inspection if needed.
+exec > >(tee -a "$RUN_LOG_FILE") 2>&1
+
+echo "[$(date)] Running Futures Trend Paper Trade Algo..."
 
 # ----------------------------
 # Load env (if present)
@@ -19,7 +27,8 @@ set +a
 # ----------------------------
 # Sanity checks (don’t print secrets)
 # ----------------------------
-
+: "${ALPACA_KEY_ID:?ALPACA_KEY_ID not set}"
+: "${ALPACA_SECRET_KEY:?ALPACA_SECRET_KEY not set}"
 
 # Kuma config (same as yours)
 # --- Kuma config / URL building ---
@@ -103,14 +112,7 @@ trap on_exit EXIT INT TERM
 # Run your job
 # ----------------------------
 cd /app
-
-poetry run python services/spaces_file_sync.py download --key CL.csv --path data/CL.csv
-poetry run python services/spaces_file_sync.py download --key portfolio_cl.csv --path data/portfolio_cl.csv
-
 poetry run python algo.py
-
-poetry run python services/spaces_file_sync.py upload --key CL.csv --path data/CL.csv
-poetry run python services/spaces_file_sync.py upload --key portfolio_cl.csv --path data/portfolio_cl.csv
 
 # Success heartbeat
 kuma_send "up" "${KUMA_MSG_OK:-ok}" "$(to_ms)" "0"
