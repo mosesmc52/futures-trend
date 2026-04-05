@@ -7,7 +7,7 @@ set -euo pipefail
 set -x
 export PYTHONUNBUFFERED=1
 
-RUN_LOG_FILE="${RUN_LOG_FILE:-/tmp/etf-volatility-harvest.log}"
+RUN_LOG_FILE="${RUN_LOG_FILE:-/tmp/futures-trend.log}"
 mkdir -p "$(dirname "$RUN_LOG_FILE")"
 touch "$RUN_LOG_FILE"
 

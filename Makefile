@@ -1,4 +1,4 @@
-PROJECT_NAME ?= etf-volatility-harvest
+PROJECT_NAME ?= futures-trend
 TAG ?= latest
 IMAGE ?= ghcr.io/mosesmc52/$(PROJECT_NAME):$(TAG)
 
