@@ -28,7 +28,9 @@ packages:
           AWS_SES_ACCESS_KEY_ID: "${AWS_SES_ACCESS_KEY_ID}"
           AWS_SES_SECRET_ACCESS_KEY: "${AWS_SES_SECRET_ACCESS_KEY}"
         triggers:
-          - name: weekday-5pm
+          - name: futures-weekday-6pm
             sourceType: scheduler
             sourceDetails:
-              cron: "0 23 * * 1-5"
+              # DigitalOcean scheduler cron is UTC.
+              # 21:00 UTC maps to 6:00 PM New York during daylight time.
+              cron: "0 22 * * 1-5"
