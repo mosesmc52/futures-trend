@@ -32,5 +32,5 @@ packages:
             sourceType: scheduler
             sourceDetails:
               # DigitalOcean scheduler cron is UTC.
-              # 21:00 UTC maps to 6:00 PM New York during daylight time.
+              # 22:00 UTC maps to 6:00 PM New York during daylight time.
               cron: "0 22 * * 1-5"
