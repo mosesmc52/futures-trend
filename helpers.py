@@ -95,6 +95,9 @@ def run_single_iteration(
     cost_bps: float = 2.0,
     slippage_bps: float = 1.0,
     periods_per_year: int = 252,
+    entry_signal_mode: str = "close",  # "close" or "intraday"
+    force_reentry_after_noop_days: int = 0,
+    noop_streak: int = 0,
     # Optional execution hook (you can ignore or pass your empty place_order wrapper)
     execute_order: Optional[Callable[[str, Dict[str, Any]], None]] = None,
 ) -> IterationResult:
@@ -156,10 +159,21 @@ def run_single_iteration(
         return pd.notna(a) and pd.notna(b) and float(a) < float(b)
 
     close_t = px.loc[t, "Close"]
+    high_t = px.loc[t, "High"]
+    low_t = px.loc[t, "Low"]
 
-    # Breakout signals at close; trade next open
-    long_entry_t = _gt(close_t, donch_up_1.loc[t])
-    short_entry_t = _lt(close_t, donch_dn_1.loc[t])
+    if entry_signal_mode not in ("close", "intraday"):
+        raise ValueError("entry_signal_mode must be one of: 'close', 'intraday'")
+
+    # Entry breakout mode:
+    # - close: use close vs shifted channel (original behavior)
+    # - intraday: use high/low breaches vs shifted channel
+    if entry_signal_mode == "intraday":
+        long_entry_t = _gt(high_t, donch_up_1.loc[t])
+        short_entry_t = _lt(low_t, donch_dn_1.loc[t])
+    else:
+        long_entry_t = _gt(close_t, donch_up_1.loc[t])
+        short_entry_t = _lt(close_t, donch_dn_1.loc[t])
 
     long_exit_t = _lt(close_t, exit_dn_1.loc[t])
     short_exit_t = _gt(close_t, exit_up_1.loc[t])
@@ -188,7 +202,15 @@ def run_single_iteration(
             state = -1.0
             action = "SHORT"
         else:
-            action = "NOOP"
+            if (
+                int(force_reentry_after_noop_days) > 0
+                and int(noop_streak) >= int(force_reentry_after_noop_days)
+                and bool(long_ok_t)
+            ):
+                state = 1.0
+                action = "BUY_REENTRY"
+            else:
+                action = "NOOP"
 
     elif state == 1.0:
         # Long exits; optional reversal
@@ -356,6 +378,145 @@ def _read_last_portfolio_row(path: str) -> Optional[Dict[str, str]]:
         return rows[-1] if rows else None
 
 
+def _is_valid_portfolio_row(row: Dict[str, str]) -> bool:
+    date_val = (row.get("date") or "").strip()
+    if not date_val:
+        return False
+
+    try:
+        pd.to_datetime(date_val, errors="raise")
+    except Exception:
+        return False
+
+    try:
+        equity = float((row.get("equity") or "").strip())
+        cash = float((row.get("cash") or "").strip())
+        qty = int(float((row.get("qty") or "").strip()))
+        pos_state = float((row.get("pos_state") or "").strip())
+        exposure = float((row.get("exposure") or "").strip())
+    except Exception:
+        return False
+
+    if not np.isfinite(equity) or equity <= 0:
+        return False
+    if not np.isfinite(cash):
+        return False
+    if not np.isfinite(float(qty)):
+        return False
+    if not np.isfinite(pos_state):
+        return False
+    if not np.isfinite(exposure):
+        return False
+    if pos_state not in (-1.0, 0.0, 1.0):
+        return False
+
+    return True
+
+
+def sanitize_portfolio_csv(path: str) -> Optional[Dict[str, str]]:
+    """
+    Remove invalid trailing rows from portfolio CSV and return last valid row.
+    If no valid rows exist, leave file with header only and return None.
+    """
+    if not path or not os.path.exists(path):
+        return None
+
+    with open(path, "r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or PORTFOLIO_COLUMNS)
+        rows = list(reader)
+
+    if not rows:
+        return None
+
+    last_valid_idx = -1
+    for i, row in enumerate(rows):
+        if _is_valid_portfolio_row(row):
+            last_valid_idx = i
+
+    if last_valid_idx < 0:
+        kept_rows = []
+        last_valid = None
+    else:
+        kept_rows = rows[: last_valid_idx + 1]
+        last_valid = kept_rows[-1]
+
+    # Prune stale frozen tail:
+    # repeated flat NOOP rows with identical equity/cash/qty at the file end.
+    # Keep the first row of that tail as the last good anchor.
+    def _is_flat_noop(row: Dict[str, str]) -> bool:
+        action = (row.get("action") or "").strip().upper()
+        trade_side = (row.get("trade_side") or "").strip()
+        return (
+            action == "NOOP"
+            and parse_int_field(row, "qty", 0) == 0
+            and parse_float_field(row, "pos_state", 0.0) == 0.0
+            and parse_float_field(row, "exposure", 0.0) == 0.0
+            and trade_side == ""
+            and parse_int_field(row, "trade_qty", 0) == 0
+            and parse_float_field(row, "trade_notional", 0.0) == 0.0
+        )
+
+    def _same_portfolio_triplet(a: Dict[str, str], b: Dict[str, str]) -> bool:
+        return (
+            parse_float_field(a, "equity", np.nan)
+            == parse_float_field(b, "equity", np.nan)
+            and parse_float_field(a, "cash", np.nan)
+            == parse_float_field(b, "cash", np.nan)
+            and parse_int_field(a, "qty", 0) == parse_int_field(b, "qty", 0)
+        )
+
+    # Require a small streak so isolated NOOP rows are preserved.
+    min_stale_streak = 3
+    if len(kept_rows) >= min_stale_streak:
+        streak_len = 1
+        for i in range(len(kept_rows) - 1, 0, -1):
+            curr = kept_rows[i]
+            prev = kept_rows[i - 1]
+            if _is_flat_noop(curr) and _is_flat_noop(prev) and _same_portfolio_triplet(curr, prev):
+                streak_len += 1
+            else:
+                break
+
+        if streak_len >= min_stale_streak:
+            cut_idx = len(kept_rows) - streak_len
+            kept_rows = kept_rows[: cut_idx + 1]
+            last_valid = kept_rows[-1] if kept_rows else None
+
+    if len(kept_rows) != len(rows):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in kept_rows:
+                writer.writerow({k: row.get(k, "") for k in fieldnames})
+
+    return last_valid
+
+
+def read_portfolio_rows(path: str) -> Sequence[Dict[str, str]]:
+    if not path or not os.path.exists(path):
+        return []
+    with open(path, "r", newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def count_consecutive_flat_noops(rows: Sequence[Dict[str, str]]) -> int:
+    n = 0
+    for row in reversed(rows):
+        action = (row.get("action") or "").strip().upper()
+        if action != "NOOP":
+            break
+        if parse_int_field(row, "qty", 0) != 0:
+            break
+        if parse_float_field(row, "pos_state", 0.0) != 0.0:
+            break
+        if parse_float_field(row, "exposure", 0.0) != 0.0:
+            break
+        n += 1
+    return n
+
+
 def parse_float_field(row: Dict[str, str], key: str, default: float = 0.0) -> float:
     """
     Safe float parse for CSV row fields.
@@ -513,13 +674,13 @@ def run_daily_algo_once(
     stooq: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
-    One daily iteration:
+    One scheduler iteration (with backfill):
       1) Update price history via StooqDownloader
       2) Load last N days into DataFrame
       3) Load portfolio state from CSV (or initialize with initial_portfolio_value)
-      4) Run run_single_iteration
-      5) Rebalance via place_order
-      6) Append new row to portfolio CSV
+      4) Process each missing trading day in order
+      5) Rebalance via place_order for each day
+      6) Append one row per processed day to portfolio CSV
     """
 
     if strategy_kwargs is None:
@@ -551,18 +712,20 @@ def run_daily_algo_once(
         if col not in raw.columns:
             raise ValueError(f"Price CSV missing required column '{col}'")
 
-    df = raw[["Open", "High", "Low", "Close"]].tail(int(lookback_days)).copy()
+    full_df = raw[["Open", "High", "Low", "Close"]].copy()
 
-    if len(df) < 3:
+    if len(full_df) < 3:
         raise ValueError("Not enough history to run a single iteration")
 
-    today = df.index[-1]
+    today = full_df.index[-1]
     today_str = today.strftime("%Y-%m-%d")
 
     # --------------------------------------------------
     # 3) Load portfolio state
     # --------------------------------------------------
-    last_row = _read_last_portfolio_row(portfolio_csv_path)
+    last_row = sanitize_portfolio_csv(portfolio_csv_path)
+    prior_rows = read_portfolio_rows(portfolio_csv_path)
+    noop_streak = count_consecutive_flat_noops(prior_rows)
 
     if last_row is None:
         # Explicit initialization
@@ -577,8 +740,17 @@ def run_daily_algo_once(
     else:
         p = portfolio_state_from_last_row(last_row)
 
-    # Avoid double-processing same day
-    if p.last_date == today_str:
+    # Build set of dates to process (backfill missing trading days)
+    if p.last_date is None:
+        dates_to_process = [today]
+    else:
+        last_dt = pd.to_datetime(p.last_date, errors="coerce")
+        if pd.isna(last_dt):
+            dates_to_process = [today]
+        else:
+            dates_to_process = [d for d in full_df.index if d > last_dt]
+
+    if not dates_to_process:
         return {
             "status": "skipped",
             "reason": "already_processed",
@@ -586,81 +758,92 @@ def run_daily_algo_once(
             "symbol": symbol,
         }
 
-    open_px = float(df["Open"].iloc[-1])
-    close_px = float(df["Close"].iloc[-1])
+    first_prev_equity = p.equity
+    first_prev_qty = p.qty
+    last_action = "NOOP"
+    last_trade: Dict[str, Any] = {}
 
-    # --------------------------------------------------
-    # 4) Run strategy iteration
-    # --------------------------------------------------
-    res = run_single_iteration(
-        df,
-        prev_state=p.pos_state,
-        prev_exposure=p.exposure,
-        **strategy_kwargs,
-    )
+    for d in dates_to_process:
+        day_str = d.strftime("%Y-%m-%d")
+        day_df = full_df.loc[:d].tail(int(lookback_days)).copy()
+        if len(day_df) < 3:
+            continue
 
-    # --------------------------------------------------
-    # 5) Position sizing + paper execution
-    # --------------------------------------------------
-    target_qty = target_qty_from_state(
-        state=res.state,
-        equity=p.equity,
-        price=open_px,
-        max_gross_leverage=max_gross_leverage,
-    )
+        open_px = float(day_df["Open"].iloc[-1])
+        close_px = float(day_df["Close"].iloc[-1])
 
-    new_cash, new_qty, trade_rec = place_order(
-        symbol=symbol,
-        cash=p.cash,
-        qty=p.qty,
-        target_qty=target_qty,
-        fill_price=open_px,
-    )
+        res = run_single_iteration(
+            day_df,
+            prev_state=p.pos_state,
+            prev_exposure=p.exposure,
+            noop_streak=noop_streak,
+            **strategy_kwargs,
+        )
 
-    new_equity = mark_to_market_equity(new_cash, new_qty, close_px)
+        target_qty = target_qty_from_state(
+            state=res.state,
+            equity=p.equity,
+            price=open_px,
+            max_gross_leverage=max_gross_leverage,
+        )
 
-    p_next = PortfolioState(
-        cash=new_cash,
-        qty=new_qty,
-        equity=new_equity,
-        pos_state=res.state,
-        exposure=res.exposure,
-        last_date=today_str,
-    )
+        new_cash, new_qty, trade_rec = place_order(
+            symbol=symbol,
+            cash=p.cash,
+            qty=p.qty,
+            target_qty=target_qty,
+            fill_price=open_px,
+        )
 
-    # --------------------------------------------------
-    # 6) Append portfolio row
-    # --------------------------------------------------
-    append_portfolio_row(
-        portfolio_csv_path,
-        {
-            "date": today_str,
-            "symbol": symbol,
-            "equity": round(p_next.equity, 6),
-            "cash": round(p_next.cash, 6),
-            "qty": p_next.qty,
-            "pos_state": round(p_next.pos_state, 6),
-            "exposure": round(p_next.exposure, 6),
-            "open": round(open_px, 6),
-            "close": round(close_px, 6),
-            "ret": round(float(res.ret), 12),
-            "costs": round(float(res.costs), 12),
-            "turnover": round(float(res.turnover), 12),
-            "action": res.action,
-            **trade_rec,
-        },
-    )
+        new_equity = mark_to_market_equity(new_cash, new_qty, close_px)
+        p = PortfolioState(
+            cash=new_cash,
+            qty=new_qty,
+            equity=new_equity,
+            pos_state=res.state,
+            exposure=res.exposure,
+            last_date=day_str,
+        )
+
+        append_portfolio_row(
+            portfolio_csv_path,
+            {
+                "date": day_str,
+                "symbol": symbol,
+                "equity": round(p.equity, 6),
+                "cash": round(p.cash, 6),
+                "qty": p.qty,
+                "pos_state": round(p.pos_state, 6),
+                "exposure": round(p.exposure, 6),
+                "open": round(open_px, 6),
+                "close": round(close_px, 6),
+                "ret": round(float(res.ret), 12),
+                "costs": round(float(res.costs), 12),
+                "turnover": round(float(res.turnover), 12),
+                "action": res.action,
+                **trade_rec,
+            },
+        )
+
+        if res.action == "NOOP" and p.qty == 0 and p.pos_state == 0.0 and p.exposure == 0.0:
+            noop_streak += 1
+        else:
+            noop_streak = 0
+
+        last_action = res.action
+        last_trade = trade_rec
 
     return {
         "status": "ok",
-        "date": today_str,
+        "date": p.last_date,
         "symbol": symbol,
-        "action": res.action,
-        "prev_equity": p.equity,
-        "new_equity": p_next.equity,
-        "prev_qty": p.qty,
-        "new_qty": p_next.qty,
-        "trade": trade_rec,
+        "action": last_action,
+        "prev_equity": first_prev_equity,
+        "new_equity": p.equity,
+        "prev_qty": first_prev_qty,
+        "new_qty": p.qty,
+        "trade": last_trade,
+        "processed_days": len(dates_to_process),
     }
 
 

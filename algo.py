@@ -26,6 +26,8 @@ out = run_daily_algo_once(
         "max_leverage": 2.0,
         "cost_bps": 0.0,
         "slippage_bps": 1.0,
+        "entry_signal_mode": "intraday",
+        "force_reentry_after_noop_days": 5,
     },
 )
 
