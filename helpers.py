@@ -96,8 +96,6 @@ def run_single_iteration(
     slippage_bps: float = 1.0,
     periods_per_year: int = 252,
     entry_signal_mode: str = "close",  # "close" or "intraday"
-    force_reentry_after_noop_days: int = 0,
-    noop_streak: int = 0,
     # Optional execution hook (you can ignore or pass your empty place_order wrapper)
     execute_order: Optional[Callable[[str, Dict[str, Any]], None]] = None,
 ) -> IterationResult:
@@ -202,15 +200,7 @@ def run_single_iteration(
             state = -1.0
             action = "SHORT"
         else:
-            if (
-                int(force_reentry_after_noop_days) > 0
-                and int(noop_streak) >= int(force_reentry_after_noop_days)
-                and bool(long_ok_t)
-            ):
-                state = 1.0
-                action = "BUY_REENTRY"
-            else:
-                action = "NOOP"
+            action = "NOOP"
 
     elif state == 1.0:
         # Long exits; optional reversal
@@ -494,29 +484,6 @@ def sanitize_portfolio_csv(path: str) -> Optional[Dict[str, str]]:
     return last_valid
 
 
-def read_portfolio_rows(path: str) -> Sequence[Dict[str, str]]:
-    if not path or not os.path.exists(path):
-        return []
-    with open(path, "r", newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
-
-
-def count_consecutive_flat_noops(rows: Sequence[Dict[str, str]]) -> int:
-    n = 0
-    for row in reversed(rows):
-        action = (row.get("action") or "").strip().upper()
-        if action != "NOOP":
-            break
-        if parse_int_field(row, "qty", 0) != 0:
-            break
-        if parse_float_field(row, "pos_state", 0.0) != 0.0:
-            break
-        if parse_float_field(row, "exposure", 0.0) != 0.0:
-            break
-        n += 1
-    return n
-
-
 def parse_float_field(row: Dict[str, str], key: str, default: float = 0.0) -> float:
     """
     Safe float parse for CSV row fields.
@@ -724,8 +691,6 @@ def run_daily_algo_once(
     # 3) Load portfolio state
     # --------------------------------------------------
     last_row = sanitize_portfolio_csv(portfolio_csv_path)
-    prior_rows = read_portfolio_rows(portfolio_csv_path)
-    noop_streak = count_consecutive_flat_noops(prior_rows)
 
     if last_row is None:
         # Explicit initialization
@@ -776,7 +741,6 @@ def run_daily_algo_once(
             day_df,
             prev_state=p.pos_state,
             prev_exposure=p.exposure,
-            noop_streak=noop_streak,
             **strategy_kwargs,
         )
 
@@ -824,11 +788,6 @@ def run_daily_algo_once(
                 **trade_rec,
             },
         )
-
-        if res.action == "NOOP" and p.qty == 0 and p.pos_state == 0.0 and p.exposure == 0.0:
-            noop_streak += 1
-        else:
-            noop_streak = 0
 
         last_action = res.action
         last_trade = trade_rec
