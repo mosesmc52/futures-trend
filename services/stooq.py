@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import os
 import random
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -49,6 +51,11 @@ class StooqDownloader:
     BASE_URL = "https://stooq.com"
     HTML_PATH = "/q/d/"
     CSV_PATH = "/q/d/l/"
+    DEFAULT_USER_AGENT = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    )
 
     def __init__(
         self,
@@ -63,11 +70,22 @@ class StooqDownloader:
         self.page_jitter = page_jitter
 
         self.session = requests.Session()
-        ua = UserAgent(platforms="desktop")
+        self.user_agent = self._build_user_agent()
         self.session.headers.update(
             {
-                "User-Agent": ua.chrome,
+                "User-Agent": self.user_agent,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "identity",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "Connection": "keep-alive",
+                "DNT": "1",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-User": "?1",
             }
         )
 
@@ -221,6 +239,16 @@ class StooqDownloader:
     # HTML crawl path (incremental stop)
     # ============================================================
 
+    def _build_user_agent(self) -> str:
+        try:
+            ua = UserAgent(platforms="desktop")
+            chrome = (ua.chrome or "").strip()
+            if chrome:
+                return chrome
+        except Exception:
+            pass
+        return self.DEFAULT_USER_AGENT
+
     def _crawl_html(
         self, symbol: str, interval: str, stop_at_dt: Optional[datetime]
     ) -> List[StooqBar]:
@@ -304,9 +332,49 @@ class StooqDownloader:
     def _fetch_html_page(self, symbol: str, interval: str, page: int):
         url = f"{self.BASE_URL}{self.HTML_PATH}"
         params = {"s": symbol, "i": interval, "l": str(page)}
-        r = self.session.get(url, params=params, timeout=self.timeout)
+        headers = {
+            "Referer": f"{self.BASE_URL}{self.HTML_PATH}?s={symbol}&i={interval}",
+        }
+        r = self.session.get(url, params=params, headers=headers, timeout=self.timeout)
         r.raise_for_status()
+        if self._is_browser_verify_page(r.text):
+            self._solve_browser_verify(r.text)
+            r = self.session.get(
+                url, params=params, headers=headers, timeout=self.timeout
+            )
+            r.raise_for_status()
         return html.fromstring(r.content)
+
+    def _is_browser_verify_page(self, text: str) -> bool:
+        return "__verify" in text and "crypto.subtle.digest" in text
+
+    def _solve_browser_verify(self, text: str) -> None:
+        c_match = re.search(r'const\s+c="([^"]+)"', text)
+        d_match = re.search(r"\bd=(\d+)", text)
+        if not c_match or not d_match:
+            raise RuntimeError("Stooq browser verification challenge format changed")
+
+        challenge = c_match.group(1)
+        difficulty = int(d_match.group(1))
+        prefix = "0" * difficulty
+        nonce = 0
+
+        while True:
+            digest = hashlib.sha256(f"{challenge}{nonce}".encode()).hexdigest()
+            if digest.startswith(prefix):
+                break
+            nonce += 1
+
+        r = self.session.post(
+            f"{self.BASE_URL}/__verify",
+            data={"c": challenge, "n": str(nonce)},
+            headers={
+                "Referer": f"{self.BASE_URL}{self.HTML_PATH}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
 
     def _extract_table_rows(self, doc) -> List[List[str]]:
         tables = doc.xpath("//table[@class='fth1']")
